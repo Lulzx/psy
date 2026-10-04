@@ -6,6 +6,7 @@ Psytrance written and synthesized entirely in Python. It uses no samples, DAW or
 python3 make_song.py                       # Mycelium -> out/mycelium.wav + out/mycelium.mp3
 python3 make_song.py --piece journey       # Journey  -> out/journey.wav + .mp3
 python3 make_song.py --piece twisted       # Twisted  -> out/twisted.wav + .mp3
+python3 make_song.py --piece follower      # Follower -> out/follower.wav + .mp3
 python3 make_song.py --seed 9              # same story, every melodic and rhythmic decision rewritten
 python3 make_song.py --air 0               # old fully dark top end, for A/B
 python3 make_song.py --out out/mycelium_improved.wav  # keep an older render for comparison
@@ -38,6 +39,7 @@ There is nothing to install beyond that. Run the scripts from the repository roo
 
 | Piece | Length | Tempo | Character |
 |---|---|---|---|
+| **Follower** (`psy/follower.py`) | 3:53 | 126 → 150 → 128 BPM | Scary night-forest piece. Your flute is answered from the dark, closer and more wrong each time. Heartbeat kick, phasing footsteps, endless Shepard wind. See [docs/follower.md](docs/follower.md). |
 | **Mycelium** (`psy/mycelium.py`, default) | 4:00 | 132 → 145 → 134 BPM | Earthy psychedelic ceremony in 8 chapters, after Astrix's jungle-tribal full-on and Infected Mushroom's melodic writing. Hand drums in Middle-Eastern rhythms, oud, throat singing, ney flute, didgeridoo, "melting" pads. |
 | **Journey** (`psy/journey.py`) | 4:25 | 138 → 150 → 140 BPM | A through-composed psytrance tone poem in 9 chapters, temple to revelation and back. Ney flute, chant, tanpura, warm lead, rolling bass. |
 | **Twisted** (`psy/twisted.py`) | 3:48 | 147 BPM | Mandragora-inspired twisted full-on in a conventional section/drop structure, with a composed hook and a key change. |

@@ -11,9 +11,10 @@ from collections import Counter
 sys.path.insert(0, ".")
 from psy.journey import Journey
 from psy.mycelium import Mycelium
+from psy.follower import Follower
 
 piece = sys.argv[1] if len(sys.argv) > 1 else "mycelium"
-cls = dict(mycelium=Mycelium, journey=Journey)[piece]
+cls = dict(mycelium=Mycelium, journey=Journey, follower=Follower)[piece]
 song = cls(**({"seed": int(sys.argv[2])} if len(sys.argv) > 2 else {}))
 
 phrases = {}
