@@ -1,6 +1,6 @@
 """Wild Current: original 160 BPM organic psytrance, G minor / G dorian.
 
-A new flute call, plucked answers, forward hand percussion and didgeridoo over
+A new flute call, guitar answers, forward hand percussion and didgeridoo over
 sixteenth-note bass. Reference measurements inform tempo, dynamics and weight;
 no reference audio or transcribed melody is used in the render.
 """
@@ -9,6 +9,7 @@ from . import dsp, instruments as ins, theory as th
 from .journey import Journey
 from .mycelium import Mycelium
 from .song import place
+from .guitar import picked_string, strum
 
 
 def chapter(name, bars, energy, carriers, mode="aeolian", chords=(0, 0, 3, 0), **kw):
@@ -32,7 +33,7 @@ class WildCurrent(Mycelium):
     RISES = {"feet find the current": 4, "the circle gathers": 4, "under the surface": 4}
     SWELL_AT = ("wild current", "running with fire", "one more sunrise")
     FALLS = ()
-    LAYERS = ("r_kick", "r_bass", "r_hand_drums", "r_didge", "r_melody", "r_fx")
+    LAYERS = ("r_kick", "r_bass", "r_hand_drums", "r_didge", "r_melody", "r_guitar", "r_fx")
     MASTER_RMS = -10.8
     MASTER_LUFS = -10.3
     DYN_DB, DYN_FULL = -12.0, 0.82
@@ -76,6 +77,49 @@ class WildCurrent(Mycelium):
             if phase in (3,7):
                 self.counter.extend((bar,t,0.4,d,"oud")
                                     for t,d in [(1.75,0),(2.5,4),(3.25,2)])
+
+    def r_melody(self):
+        """Keep the breathy flute call; guitar now takes all plucked responses."""
+        events = [(bar,b,ln,self.note(bar,d),g)
+                  for bar,b,ln,d,g,carrier in self.melody if carrier in ("ney","duet")]
+        ney = self._phrases(events, lambda notes,n: ins.ney_phrase(notes,n,self.rng))
+        self.add(ney,0.49,rev=0.35,dly=0.06,sc=0.12,hp=170,lp=5200)
+
+    def r_guitar(self):
+        """Palm-muted offbeats in drops; open chords and picked answers in breaks."""
+        rhythm, melody = self.track(), self.track()
+        rng = np.random.default_rng(self.seed+730)
+        cache = {}
+        for bar in range(self.bars):
+            e = self.E[bar]
+            local = self.rows[bar]["i"]
+            scale, chord = self.scale(bar), self.chord(bar)
+            voicing = [self.root+12+th.deg(scale,chord+d) for d in (0,4,7,9)]
+            muted = e>0.55
+            # Leave the returning flute call clear, then answer it off the beat.
+            slots = (0.5,1.5,2.5,3.25,3.75) if muted else (0.25,2.5)
+            if e<0.2:
+                slots = (2.5,) if local%2==1 else ()
+            for j,beat in enumerate(slots):
+                up = j%2==1
+                duration = self.bl(bar)*(0.32 if muted else 1.25)
+                variant = (local+j)%3
+                key = (tuple(voicing),muted,up,variant)
+                if key not in cache:
+                    cache[key] = strum(voicing,duration,rng,muted,up)
+                gain = (0.55+0.45*e)*(0.7 if local%8 in (0,4) else 1)
+                place(rhythm,cache[key],self.human_pos(bar,beat,"guitar"),gain,-0.30)
+        responses = [(bar,b,ln,d) for bar,b,ln,d,g,c in self.melody if c in ("oud","duet")]
+        responses += [(bar,b,ln,d) for bar,b,ln,d,kind in self.counter if kind=="oud"]
+        for bar,beat,length,degree in responses:
+            midi = self.note(bar,degree,base=24,lo=19,hi=36)
+            duration = self.bl(bar)*length*0.9
+            key = (midi,round(duration,3))
+            if key not in cache:
+                cache[key] = picked_string(midi,duration,rng)
+            place(melody,cache[key],self.human_pos(bar,beat,"guitar"),1.0,0.25)
+        self.add(rhythm,0.38,rev=0.10,dly=0.035,sc=0.18,hp=130,lp=5000)
+        self.add(melody,0.43,rev=0.22,dly=0.12,sc=0.12,hp=120,lp=5200)
 
     def r_bass(self):
         """Centered short K-B-B-B roll with deliberate gallop/triplet answers."""
