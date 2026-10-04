@@ -1,0 +1,16 @@
+# media / rendered output
+out/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.png
+*.jpg
+*.mp4
+
+# python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
