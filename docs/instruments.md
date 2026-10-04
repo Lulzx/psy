@@ -20,7 +20,7 @@ The "Used by" column uses M = Mycelium, J = Journey, T = Twisted, S = style engi
 
 | Function | Sound | Used by |
 |---|---|---|
-| `hand_drum(kind, hz, rng)` | Darbuka/djembe strokes. `doum`: deep pitch-dropping centre hit with a low thump. `tek`: rim click, a short high partial plus 950 Hz noise. `slap`: 750 Hz noise with a mid partial. `ghost`: a quiet tek. Everything is lowpassed at 3 kHz. | M |
+| `hand_drum(kind, hz, rng, strength)` | Modal darbuka/djembe. Ten circular-membrane modes (`MEMBRANE` ratios 1, 1.594, 2.136, ...), each with its own decay, plus an amplitude-dependent pitch drop at the onset. `STROKES` sets the mode weights: `doum` excites the round centre modes and adds a goblet air resonance. `tek` and `slap` excite the rim (diametric) modes. A contact-time smoothing means soft hits are darker, and a little skin noise is added. `ghost`: a quiet tek. Lowpassed at 2.6 to 5.8 kHz depending on `strength`. | M |
 | `tom(hz, decay, rng)` | Pitched tom with a pitch drop and a short skin noise | J, T |
 | `log_drum(hz, rng)` | Wooden slit drum: inharmonic partials at 1, 2.76 and 5.4 times the pitch, decaying in 110, 40 and 15 ms. Damped, no bell sustain. | M |
 | `udu(hz, rng)` | Clay pot "bloop": a sine whose pitch rises after the hit | M |
@@ -46,7 +46,7 @@ The "Used by" column uses M = Mycelium, J = Journey, T = Twisted, S = style engi
 
 | Function | Sound | Used by |
 |---|---|---|
-| `voice(midi, dur, vowels, rng)` | Formant chant. A buzzy saw and pulse source (with a pitch scoop and delayed vibrato) goes through three bandpass formants that glide across a vowel list such as `["a", "o", "u"]`. Formant table: `VOWELS`. Also used for choir counter-lines. | M, J, T |
+| `voice(midi, dur, vowels, rng, singers)` | Formant chant from a small ensemble (3 by default). Each singer is a Rosenberg glottal pulse (`glottal()`) with its own detune, vibrato rate, pitch scoop, jitter (fast pitch wobble), shimmer (level wobble), aspiration noise and a staggered entry. The sum goes through three formants whose bandwidths grow with frequency (70 Hz + 6%) and glide across a vowel list such as `["a", "o", "u"]`. Formant table: `VOWELS`. Also used for choir counter-lines. | M, J, T |
 | `throat_phrase(notes, n, f0, rng)` | Overtone (throat) singing. A low drone at `f0` (E2 in Mycelium) with vowel body formants, plus a very narrow bandpass (Q 28) that picks out one harmonic of the drone as a whistle. Each note's target pitch snaps to the nearest harmonic (4th to 14th), and the whistle glides between harmonics. The melody therefore sounds in just intonation, as real throat singing does. | M |
 
 ## Drones
@@ -76,6 +76,26 @@ The "Used by" column uses M = Mycelium, J = Journey, T = Twisted, S = style engi
 Mycelium builds its own riser inside `r_fx`: wind-like bandpassed noise sweeping 150 Hz to 1.5 kHz, with a slowly rising saw at the bass root, lowpassed at 3 kHz.
 
 ## Writing a new instrument
+
+The revised `ney_phrase` uses a continuous performer state: variable vibrato,
+slow pitch drift, and note pressure affecting amplitude, harmonics, noise and
+intonation. `expression` controls pitch expressiveness. `hand_drum` accepts
+`strength`, which affects tuning variation, attack tone and deep-stroke decay.
+Mycelium caches eight takes per strength/stroke/tuning and adds a small consistent
+offbeat delay plus timing deviations; the electronic rhythm stays on its grid.
+
+`oud` now synthesizes two slightly detuned strings with a fractional allpass in
+each feedback loop, intensity-dependent excitation, alternating pick position,
+and body resonances. `strength` and `stroke` control playing behavior. The strings
+are summed together; explicit mechanical coupling is not modeled.
+
+Organic motion: `supersaw` gives every voice its own slow pitch drift and a
+wandering vibrato rate, `pad_chord` drifts its voices and moves its filter
+with `dsp.wander` (the two sides breathe slightly apart), and `ney_phrase` drifts with
+`wander` too. `ney_phrase(..., air_amt)` adds a soft breath band (2.5 to 9 kHz)
+that follows blowing pressure and note onsets, with no transients. `rich_bass`
+accepts `phase` and `cents`, and `log_drum` randomizes its partials, so
+callers can keep several variants of each note instead of one cached copy.
 
 - Return mono unless the sound is inherently stereo. `place()` pans mono signals.
 - Normalize to a peak around 1 and let the layer set the level.

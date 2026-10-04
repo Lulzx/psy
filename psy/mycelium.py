@@ -60,10 +60,84 @@ class Mycelium(Journey):
     LAYERS = ("r_kick", "r_bass", "r_low_drones", "r_hand_drums", "r_logs", "r_didge", "r_melody",
               "r_pad", "r_nature", "r_fx")
     MASTER_RMS = -11.5
-    DYN_DB, DYN_FULL = -12.0, 0.85  # deeper valleys: full level only near the peaks
+    MASTER_LUFS = -10.6
+    # A rock hollow at the edge of the forest: stone walls, earth floor, open sky.
+    ROOM = dict(room=(20.0, 16.0, 9.0), absorb=(0.4, 0.3, 1.0))
+    STAGE = dict(hand=dict(az=-8, dist=0.15), logs=dict(az=34, dist=0.45, width=0.8),
+                 didge=dict(az=-40, dist=0.6, width=0.6, move=25), lead=dict(az=0, dist=0.35, width=1.2),
+                 oud=dict(az=22, dist=0.25, width=0.9), ney=dict(az=-14, dist=0.1, move=20),
+                 throat=dict(az=10, dist=0.7, width=0.8), chant=dict(az=0, dist=0.55, width=1.4),
+                 tanpura=dict(az=-5, dist=0.4, width=1.3), pad=dict(dist=0.65, width=1.3),
+                 frogs=dict(az=-20, dist=0.85, width=1.3), drops=dict(az=15, dist=0.5, width=1.2),
+                 fx=dict(dist=0.5, width=1.2))
+    REVERB = dict(rt60=3.0, hf_ratio=0.45, size=1.0)
+    DYN_DB, DYN_FULL = -15.0, 0.85  # deeper valleys: full level only near the peaks
 
     def __init__(self, seed=5, root=ROOT):
         super().__init__(seed=seed, root=root)
+
+    def _compose(self):
+        """Eight-bar question/answer arcs, with a recognizable returning theme."""
+        super()._compose()
+        developed = []
+        for bar in range(self.bars):
+            local = self.rows[bar]["i"]
+            carrier = self.unit(bar)["carrier"]
+            # Theme returns at the beginning and midpoint of each eight-bar arc.
+            if local % 8 in (0, 4):
+                answering = local % 8 == 4
+                for b, ln, d in self.MOTIF:
+                    if answering and b >= 2:
+                        d = {2: 1, 4: 0}.get(d, d)
+                    d = self._snap(d, self.chord(bar)) if b in (0, 2) else d
+                    developed.append((bar, b, ln, d, False, carrier))
+            else:
+                for ev in self.melody:
+                    if ev[0] != bar:
+                        continue
+                    if local % 8 == 7:
+                        # Space to inhale before the next question; preserve tails.
+                        if ev[1] >= 2.5:
+                            continue
+                        ev = (ev[0], ev[1], min(ev[2], 2.5 - ev[1]), *ev[3:])
+                    developed.append(ev)
+        self.melody = developed
+
+    def render(self, log=print):
+        # Slow foreground activity envelope: backgrounds yield, never hard mute.
+        activity = np.zeros(self.bars)
+        for bar, b, ln, d, g, carrier in self.melody:
+            if carrier in ("ney", "duet", "oud", "lead"):
+                activity[bar] += ln / 4
+        for bar, b, ln, d, kind in self.counter:
+            if kind == "ney":
+                activity[bar] += 0.4 * ln / 4
+        activity = np.clip(activity, 0, 1)
+        self.foreground = self.curve(activity)
+        audio = super().render(log)
+        del self.foreground
+        return audio
+
+    def add(self, buf, gain=1.0, rev=0.0, dly=0.0, **kw):
+        layer = getattr(self, "active_layer", "")
+        if layer in ("r_pad", "r_low_drones", "r_didge"):
+            buf = buf * (1 - 0.26 * self.foreground)[:, None]
+            gain *= 0.83 if layer == "r_low_drones" else 0.9
+        super().add(buf, gain, rev=rev, dly=dly, **kw)
+
+    def effect_returns(self):
+        echoes = dsp.tempo_echo(self.dly, self.t0)
+        self.rev += echoes * 0.18
+        ambience = dsp.fdn_reverb(dsp.static(self.rev, "hp", 300), seed=self.seed + 92, **self.REVERB)
+        ambience = dsp.eq(dsp.static(ambience, "lp", 9000), "hs", 3500, 5.0 * self.AIR)
+        return self.mix + ambience * 0.42 + echoes * 0.38
+
+    def human_pos(self, bar, beat, lane="drum"):
+        """A consistent laid-back player groove plus small stroke deviations."""
+        offbeat = int(round(beat * 4)) % 2
+        offset = (0.005 + 0.004 * offbeat if lane == "drum" else 0.003)
+        offset += self.rng.normal(0, 0.0025 if lane == "drum" else 0.0015)
+        return max(0, self.pos(bar, beat) + int(offset * SR))
 
     def chap_curve(self, key):
         return np.array([self.ch(b).get(key, 0.0) for b in range(self.bars)], dtype=float)
@@ -101,16 +175,17 @@ class Mycelium(Journey):
             if key not in cache:
                 t_ = self.tonic(bar)
                 p = dict(len=1.12 * self.bl(bar) / 4, f0=190, pdecay=0.026, click=0.2, drive=1.9, tail=0.42)
-                cache[key] = ins.kick(dsp.midi_hz(t_ if 27 <= t_ <= 33 else self.root), p, self.rng)
+                cache[key] = [ins.kick(dsp.midi_hz(t_ if 27 <= t_ <= 33 else self.root), self.vary(p), self.rng)
+                              for _ in range(4)]
             e = self.E[bar]
             beats = (0.0, 2.5) if e < 0.42 else (0.0, 1.0, 2.0, 3.0)  # dubby half-time -> four on the floor
             for bt in beats:
                 p0 = self.pos(bar, bt)
-                place(buf, cache[key], p0, kl[bar])
+                place(buf, cache[key][int(self.rng.integers(4))], p0, kl[bar])
                 if kl[bar] > 0.3:
                     hits.append(p0)
         self.sc_env = dsp.sidechain_env(self.n, hits, 1.0, 0.3)
-        self.add(buf, 1.0, cut=self.curve(np.clip((self.E - 0.25) / 0.3, 0.3, 1)))
+        self.add(buf, 0.86, cut=self.curve(np.clip((self.E - 0.25) / 0.3, 0.3, 1)))
 
     def r_bass(self):
         """Dub bass at low energy, Astrix-style tight rolling bass once the jungle opens."""
@@ -118,9 +193,9 @@ class Mycelium(Journey):
         buf = self.track()
         cache = {}
         bl_ = self.lvl(0.2, 0.15)
-        warm = dict(wave="saw", base=110, peak=1200, env_decay=0.06, res=1.2, sub_lvl=0.85, drive=1.5,
+        warm = dict(wave="saw", base=110, peak=1200, env_decay=0.06, res=1.2, sub_lvl=0.68, drive=1.5,
                     amp_decay=0.3, sustain=0.7, growl=0.12)
-        tight = dict(wave="saw", base=130, peak=2400, env_decay=0.038, res=1.7, sub_lvl=0.72, drive=2.1,
+        tight = dict(wave="saw", base=130, peak=2400, env_decay=0.038, res=1.7, sub_lvl=0.58, drive=2.1,
                      amp_decay=0.12, sustain=0.55, growl=0.28)
         walk = np.cumsum(rng.normal(0, 0.12, self.bars))
         walk -= np.convolve(walk, np.ones(9) / 9, "same")
@@ -166,13 +241,13 @@ class Mycelium(Journey):
             for t, semi, vel, d in notes:
                 m = base + semi
                 dur = d * self.bl(bar)
-                key = (m, round(dur, 3), snd, morph)
+                key = (m, round(dur, 3), snd, morph, int(rng.integers(3)))
                 if key not in cache:
                     p0 = warm if snd == "warm" else tight
                     p = dict(p0, peak=p0["peak"] * morph, env_decay=p0["env_decay"] * (0.75 + 0.25 * morph))
-                    cache[key] = ins.rich_bass(dsp.midi_hz(m), dur, p)
+                    cache[key] = ins.rich_bass(dsp.midi_hz(m), dur, self.vary(p, 0.5))
                 place(buf, cache[key], self.pos(bar, t), bl_[bar] * vel)
-        self.add(buf, 0.75, cut=self.curve(np.clip((self.E - 0.12) / 0.45, 0.25, 1)))
+        self.add(buf, 0.60, cut=self.curve(np.clip((self.E - 0.12) / 0.45, 0.25, 1)))
 
     def r_hand_drums(self):
         """Darbuka/djembe in maqsum, baladi, saidi... ghost notes and slaps grow with energy.
@@ -181,12 +256,13 @@ class Mycelium(Journey):
         buf = self.track()
         cache = {}
 
-        def stroke(kind, bar):
+        def stroke(kind, bar, strength=0.8):
             hz = dsp.midi_hz(self.tonic(bar) + 12)
-            key = (kind, round(hz, 1))
+            strength = round(float(np.clip(strength, 0.2, 1.0)) * 4) / 4
+            key = (kind, round(hz, 1), strength)
             if key not in cache:
-                cache[key] = [ins.hand_drum(kind, hz, rng) for _ in range(3)]
-            return cache[key][int(rng.integers(3))]
+                cache[key] = [ins.hand_drum(kind, hz, rng, strength=strength) for _ in range(8)]
+            return cache[key][int(rng.integers(8))]
 
         roll_bars = set()
         for name, nb in self.RISES.items():
@@ -213,16 +289,16 @@ class Mycelium(Journey):
                 kind = {"D": "doum", "T": "tek", "S": "slap"}[ch]
                 if kind == "tek" and rng.random() < 0.25 * e:
                     kind = "slap"
-                place(buf, stroke(kind, bar), self.pos(bar, j * 0.5), lv * rng.uniform(0.85, 1.0),
+                place(buf, stroke(kind, bar, lv), self.human_pos(bar, j * 0.5), lv * rng.uniform(0.85, 1.0),
                       -0.25 if kind == "doum" else 0.3)
             # 16th ghost notes fill in as the energy rises
             for s in range(16):
                 if s % 2 == 1 and rng.random() < 0.15 + 0.55 * e:
-                    place(buf, stroke("ghost", bar), self.pos(bar, s / 4), lv * rng.uniform(0.5, 0.9),
+                    place(buf, stroke("ghost", bar, 0.3), self.human_pos(bar, s / 4), lv * rng.uniform(0.5, 0.9),
                           0.45 if s % 4 == 1 else 0.15)
             if bar % 4 == 3 and e > 0.4 and rng.random() < 0.7:  # flourish at the phrase end
                 for k in range(6):
-                    place(buf, stroke("tek" if k % 2 else "slap", bar), self.pos(bar, 3.0 + k / 6), lv * (0.5 + k / 12), 0.4 - 0.15 * k)
+                    place(buf, stroke("tek" if k % 2 else "slap", bar, 0.5 + k / 12), self.human_pos(bar, 3.0 + k / 6), lv * (0.5 + k / 12), 0.4 - 0.15 * k)
         for name, nb in self.RISES.items():  # accelerating doum/tek rolls into turning points
             end = self.chap_start[name] + next(c["bars"] for c in self.CHAPTERS if c["name"] == name)
             first = end - nb
@@ -232,9 +308,9 @@ class Mycelium(Journey):
                 for k in range(4 * div):
                     x = (b * 4 + k / div) / (nb * 4)
                     kind = "doum" if k % div == 0 else "tek"
-                    place(buf, stroke(kind, first + b), self.pos(first + b, k / div), 0.25 + 0.65 * x ** 1.5,
+                    place(buf, stroke(kind, first + b, 0.3 + 0.7 * x), self.human_pos(first + b, k / div), 0.25 + 0.65 * x ** 1.5,
                           0.3 * np.sin(k))
-        self.add(buf, 0.45, rev=0.18, dly=0.04, hp=50, lp=6000)
+        self.add(buf, 0.63, rev=0.18, dly=0.04, hp=50, lp=self.air(6000), src="hand")
 
     def r_logs(self):
         """Pitched wooden log-drum ostinato; mutates every 2 bars, grows denser with energy."""
@@ -259,9 +335,9 @@ class Mycelium(Journey):
                 while m > self.root + 31:
                     m -= 12
                 if m not in cache:
-                    cache[m] = ins.log_drum(dsp.midi_hz(m), rng)
-                place(buf, cache[m], self.pos(bar, s / 4), lv[bar] * rng.uniform(0.75, 1.0), 0.45 * np.sin(s * 0.9))
-        self.add(buf, 0.42, rev=0.2, dly=0.15, sc=0.3, hp=120, lp=5000)
+                    cache[m] = [ins.log_drum(dsp.midi_hz(m), rng) for _ in range(3)]
+                place(buf, cache[m][int(rng.integers(3))], self.human_pos(bar, s / 4), lv[bar] * rng.uniform(0.75, 1.0), 0.45 * np.sin(s * 0.9))
+        self.add(buf, 0.58, rev=0.2, dly=0.15, sc=0.3, hp=120, lp=5000, src="logs")
 
     # ------------------------------------------------------------------ melody
     def r_melody(self):
@@ -271,16 +347,19 @@ class Mycelium(Journey):
         lcache, ocache = {}, {}
 
         def pluck(m, dur, bar, b, vel, pan_):
-            key = (m, round(min(dur, 1.2), 2))
+            variant = int(rng.integers(4))
+            stroke = 1 if int(round(b * 4)) % 2 == 0 else -1
+            strength = round(float(np.clip(vel, 0.25, 1.0)) * 4) / 4
+            key = (m, round(min(dur, 1.2), 2), variant, stroke, strength)
             if key not in ocache:
-                ocache[key] = ins.oud(m, min(dur, 1.2), rng)
-            place(oud, ocache[key], self.pos(bar, b), vel, pan_)
+                ocache[key] = ins.oud(m, min(dur, 1.2), rng, strength=strength, stroke=stroke)
+            place(oud, ocache[key], self.human_pos(bar, b, "oud"), vel * rng.uniform(0.92, 1.0), pan_)
 
         for bar, b, ln, d, g, carrier in self.melody:
             m = self.note(bar, d)
             dur = ln * self.bl(bar)
             if carrier == "lead":
-                key = (m, round(dur, 2))
+                key = (m, round(dur, 2), int(rng.integers(2)))
                 if key not in lcache:
                     lcache[key] = ins.warm_lead(m, dur * 0.92, rng)
                 place(lead, lcache[key], self.pos(bar, b), 1.0)
@@ -288,7 +367,7 @@ class Mycelium(Journey):
                 if ln >= 1.5:  # tremolo picking on long notes
                     k = int(ln * 4)
                     for j in range(k):
-                        pluck(m, 0.25 * self.bl(bar), bar, b + j * 0.25, 0.75 + 0.25 * (j % 2), 0.15)
+                        pluck(m, 0.25 * self.bl(bar), bar, b + j * 0.25, 0.88 if j % 2 == 0 else 0.72, 0.15)
                 else:
                     pluck(m, dur, bar, b, 1.0, 0.15)
             if carrier in ("ney", "duet"):
@@ -309,17 +388,27 @@ class Mycelium(Journey):
                 m = self.note(bar, d, base=36, lo=27, hi=40)
                 x = ins.voice(m, ln * self.bl(bar) * 0.97, ["a", "o"] if d % 2 else ["o", "a"], rng)
                 place(chant, x, self.pos(bar, b), 0.45, (d % 3 - 1) * 0.35)
-        ney = self._phrases(ney_events, lambda notes, n: ins.ney_phrase(notes, n, rng))
+        ney = self._phrases(ney_events, lambda notes, n: ins.ney_phrase(notes, n, rng, air_amt=self.AIR))
         throat = self._phrases([(br, b, ln, m, False) for br, b, ln, m in throat_events],
                                lambda notes, n: ins.throat_phrase([(s, L, dsp.midi_hz(m)) for s, L, m, _ in notes], n,
                                                                   dsp.midi_hz(self.root + 12), rng), tail=2.5)
         meltc = self.curve(self.chap_curve("melt"))
         ney = dsp.melt(ney, 1.6 * meltc, seed=self.seed)
-        self.add(lead, 0.34, rev=0.28, dly=0.25, sc=0.5, hp=180, lp=6000, chorus=True)
-        self.add(oud, 0.34, rev=0.25, dly=0.2, sc=0.3, hp=120, lp=5000)
-        self.add(ney, 0.42, rev=0.5, dly=0.3, sc=0.2, hp=200)
-        self.add(throat, 0.2, rev=0.45, dly=0.15, sc=0.2, hp=60)
-        self.add(chant, 0.24, rev=0.55, dly=0.25, sc=0.25, hp=140, lp=6000)
+        self.add(lead, 0.39, rev=0.28, dly=0.25, sc=0.5, hp=180, lp=6000, chorus=True, src="lead")
+        self.add(oud, 0.38, rev=0.16, dly=0.12, sc=0.2, hp=120, lp=self.air(5000), src="oud")
+        # Echoes bloom in rests rather than doubling every syllable.
+        for br, b, ln, m, g in ney_events:
+            if ln < 0.75:
+                continue
+            start = self.pos(br, b)
+            length = int(ln * self.bl(br) * SR)
+            s = start + int(length * 0.6)
+            e = min(start + length, self.n)
+            if e > s:
+                self.dly[s:e] += ney[s:e] * np.linspace(0, 0.13, e - s)[:, None]
+        self.add(ney, 0.49, rev=0.4, dly=0.04, sc=0.12, hp=170, lp=self.air(5200), src="ney")
+        self.add(throat, 0.32, rev=0.45, dly=0.15, sc=0.2, hp=60, src="throat")
+        self.add(chant, 0.24, rev=0.55, dly=0.25, sc=0.25, hp=140, lp=self.air(6000), src="chant")
 
     def _phrases(self, events, synth, tail=1.5):
         """Render monophonic events as connected phrases (one breath per run)."""
@@ -334,11 +423,11 @@ class Mycelium(Journey):
             s0 = self.pos(run[0][0], run[0][1])
             end = self.pos(run[-1][0], run[-1][1]) + int(run[-1][2] * self.bl(run[-1][0]) * SR) + int(tail * SR)
             notes = [(self.pos(br, b) - s0, int(ln * self.bl(br) * SR * 0.97), m, g) for br, b, ln, m, g in run]
-            place(buf, synth(notes, end - s0), s0, 1.0, rng.uniform(-0.25, 0.25))
+            place(buf, synth(notes, end - s0), s0, 1.0, -0.13)
 
         for ev in events:
             st = self.pos(ev[0], ev[1])
-            if prev_end is not None and st - prev_end > int(1.5 * SR):
+            if prev_end is not None and (st - prev_end > int(0.35 * SR) or st - self.pos(run[0][0], run[0][1]) > int(7 * SR)):
                 flush(run)
                 run = []
             run.append(ev)
@@ -373,7 +462,7 @@ class Mycelium(Journey):
                 place(rev_buf, x, self.pos(nxt) - len(x), 0.8)
         meltc = self.curve(self.chap_curve("melt"))
         buf = dsp.phaser(dsp.melt(buf + rev_buf, 3.5 * meltc, seed=self.seed + 1), rate=0.07, mix=0.5)
-        self.add(buf, 1.0, rev=0.45, sc=0.5, hp=110, lp=4500, chorus=True,
+        self.add(buf, 1.08, rev=0.55, sc=0.35, hp=170, lp=4500, chorus=True, src="pad",
                  cut=self.curve(np.clip(0.35 + 0.5 * self.E, 0, 1)))
 
     # ------------------------------------------------------------------ nature & fx
@@ -394,8 +483,8 @@ class Mycelium(Journey):
                 place(drops, ins.udu(hz, rng), self.pos(bar, int(rng.integers(0, 8)) * 0.5), rng.uniform(0.6, 1),
                       rng.uniform(-0.7, 0.7))
         self.add(bed, 0.6, rev=0.2, hp=40)
-        self.add(frogs, 0.14, rev=0.4, dly=0.1, hp=150, lp=2500)
-        self.add(drops, 0.2, rev=0.35, dly=0.3, sc=0.3, hp=100)
+        self.add(frogs, 0.14, rev=0.4, dly=0.1, hp=150, lp=2500, src="frogs")
+        self.add(drops, 0.25, rev=0.35, dly=0.3, sc=0.3, hp=100, src="drops")
 
     def r_fx(self):
         rng = self.rng
@@ -413,7 +502,7 @@ class Mycelium(Journey):
         for name in self.SWELL_AT:
             s = self.chap_start[name]
             place(buf, ins.impact(rng), self.pos(s), 1.6)
-        self.add(buf, 0.3, rev=0.35, dly=0.15, lp=3000)
+        self.add(buf, 0.3, rev=0.35, dly=0.15, lp=3000, src="fx")
 
     def describe(self):
         lines = [f"Mycelium — {self.bars} bars, {self.t0[-1] / 60:.1f} min, {self.bpm.min():.0f}-{self.bpm.max():.0f} BPM"]

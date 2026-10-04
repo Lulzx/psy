@@ -7,10 +7,23 @@ python3 make_song.py                       # Mycelium -> out/mycelium.wav + out/
 python3 make_song.py --piece journey       # Journey  -> out/journey.wav + .mp3
 python3 make_song.py --piece twisted       # Twisted  -> out/twisted.wav + .mp3
 python3 make_song.py --seed 9              # same story, every melodic and rhythmic decision rewritten
+python3 make_song.py --air 0               # old fully dark top end, for A/B
+python3 make_song.py --out out/mycelium_improved.wav  # keep an older render for comparison
 python3 render.py --list                   # the 8-subgenre style engine
 ```
 
-A full piece renders in 15 to 30 seconds on a laptop.
+A full piece renders in roughly 15 to 35 seconds on a laptop.
+
+Journey and Mycelium place every instrument on a stage: direction with interaural
+time and level cues, distance, early reflections of a modelled space, and a
+modulated FDN reverb. Kick and bass stay centred and dry. Notes are never
+repeated as identical copies, and the master is loudness-matched (LUFS).
+`--air 0` renders the old fully dark top end for comparison. A full Mycelium
+render takes about 50 seconds. Compare two renders with
+`python3 tools/compare.py out/mycelium_before.wav out/mycelium.wav`.
+Run `python3 -m unittest discover -s tools -p 'test_*.py'` for focused audio checks.
+Use `python3 tools/compare_audio.py out/mycelium.wav out/mycelium_improved.wav`
+to measure existing renders and make equal-RMS listening previews.
 
 ## Requirements
 

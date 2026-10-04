@@ -52,7 +52,18 @@ class Journey:
     NEY_COUNTER_WITH = ("lead", "chant")
     LAYERS = ("r_kick", "r_bass", "r_low_drones", "r_toms", "r_didge", "r_acid", "r_melody", "r_pad", "r_fx")
     MASTER_RMS = -11.5
-    DYN_DB, DYN_FULL = -10.0, 0.65  # macro dynamics: gain at E=0, energy where full level is reached
+    MASTER_LUFS = -10.3  # loudness of the pre-staging master, so A/B comparisons are fair
+    DYN_DB, DYN_FULL = -13.0, 0.65  # macro dynamics: gain at E=0, energy where full level is reached
+    # Acoustic scene. A high stone temple; every melodic source has a place in it:
+    # azimuth (deg, + = right), distance (0 close .. 1 far), stereo width, slow drift (deg).
+    ROOM = dict(room=(24.0, 20.0, 12.0), absorb=(0.3, 0.25, 0.35))
+    STAGE = dict(ney=dict(az=-14, dist=0.12, move=18), lead=dict(az=0, dist=0.35, width=1.2),
+                 chant=dict(az=4, dist=0.6, width=1.4), tanpura=dict(az=-6, dist=0.4, width=1.3),
+                 toms=dict(az=12, dist=0.25), didge=dict(az=-38, dist=0.6, width=0.6, move=25),
+                 acid=dict(az=20, dist=0.45, width=0.8, move=20), pad=dict(dist=0.65, width=1.3),
+                 fx=dict(dist=0.5, width=1.2))
+    REVERB = dict(rt60=3.4, hf_ratio=0.45, size=1.2)
+    AIR = 1.0  # 0 = the old fully dark top end; 1 = soft breath/room air above 3 kHz
 
     def __init__(self, seed=7, root=ROOT):
         self.seed = seed
@@ -331,7 +342,11 @@ class Journey:
             self.counter += self._counter_events(u, bar, c0, c1)
 
     # ================================================================== mix plumbing
-    def add(self, buf, gain=1.0, rev=0.0, dly=0.0, sc=0.0, cut=None, hp=None, lp=None, chorus=False):
+    def air(self, lp):
+        """Bus lowpass, opened up by AIR for sources whose top end is soft (breath, skin)."""
+        return lp * (1 + 0.75 * self.AIR)
+
+    def add(self, buf, gain=1.0, rev=0.0, dly=0.0, sc=0.0, cut=None, hp=None, lp=None, chorus=False, src=None):
         if cut is not None:
             fc = 120.0 * 2 ** (np.clip(cut, 0, 1) * 7.3)
             buf = np.stack([dsp.filt(buf[:, i], "lp", fc, 0.8, 256) for i in range(2)], axis=1)
@@ -344,11 +359,34 @@ class Journey:
         if sc:
             buf = buf * (1 - sc * (1 - self.sc_env))[:, None]
         buf = buf * gain
-        self.mix += buf
+        st = self.STAGE.get(src)
+        if st is not None:
+            rev += 0.3 * st.get("dist", 0)
+            az = st.get("az", 0)
+            if st.get("move"):
+                rng = np.random.default_rng(self.seed * 13 + len(src) * 7 + ord(src[0]))
+                az = az + st["move"] * dsp.wander(len(buf), 1 / 18, rng, 2)
+            self.mix += dsp.stage(buf, az, st.get("dist", 0), st.get("width", 1.0), self.ROOM,
+                                  er_level=st.get("er", 0.9), seed=self.seed + ord(src[0]))
+        else:
+            self.mix += buf
         if rev:
             self.rev += buf * rev
         if dly:
             self.dly += buf * dly
+
+    def vary(self, p, amt=1.0):
+        """Per-hit variation: a drummer never strikes twice the same way."""
+        r = self.rng
+        q = dict(p)
+        for k, v in (("f0", 0.03), ("pdecay", 0.08), ("click", 0.2), ("tail", 0.05), ("peak", 0.06),
+                     ("env_decay", 0.08)):
+            if k in q:
+                q[k] = q[k] * (1 + amt * v * r.uniform(-1, 1))
+        if "base" in q:
+            q["phase"] = float(r.random())
+            q["cents"] = 6 * r.uniform(0.7, 1.3)
+        return q
 
     def track(self):
         return np.zeros((self.n, 2))
@@ -368,11 +406,12 @@ class Journey:
             key = (self.tonic(bar), round(self.bl(bar), 3))
             if key not in cache:
                 t_ = self.tonic(bar)
-                cache[key] = ins.kick(dsp.midi_hz(t_ if 28 <= t_ <= 33 else self.root), p(bar), self.rng)
+                cache[key] = [ins.kick(dsp.midi_hz(t_ if 28 <= t_ <= 33 else self.root), self.vary(p(bar)), self.rng)
+                              for _ in range(4)]
             beats = (0.0, 2.0) if self.E[bar] < 0.3 else (0.0, 1.0, 2.0, 3.0)  # heartbeat -> four on the floor
             for bt in beats:
                 p0 = self.pos(bar, bt)
-                place(buf, cache[key], p0, kl[bar])
+                place(buf, cache[key][int(self.rng.integers(4))], p0, kl[bar])
                 if kl[bar] > 0.3:
                     hits.append(p0)
         self.sc_env = dsp.sidechain_env(self.n, hits, 1.0, 0.29)
@@ -459,11 +498,11 @@ class Journey:
             for t, semi, vel, d in notes:
                 m = base + semi
                 dur = d * self.bl(bar)
-                key = (m, round(dur, 3), snd, morph)
+                key = (m, round(dur, 3), snd, morph, int(rng.integers(3)))
                 if key not in cache:
                     p = dict(sounds[snd], peak=sounds[snd]["peak"] * morph,
                              env_decay=sounds[snd]["env_decay"] * (0.75 + 0.25 * morph))
-                    cache[key] = ins.rich_bass(dsp.midi_hz(m), dur, p)
+                    cache[key] = ins.rich_bass(dsp.midi_hz(m), dur, self.vary(p, 0.5))
                 place(buf, cache[key], self.pos(bar, t), bl_[bar] * vel)
         self.add(buf, 0.72, cut=self.curve(np.clip((self.E - 0.2) / 0.4, 0.2, 1)))
 
@@ -489,7 +528,7 @@ class Journey:
                 while m > self.root + 19:
                     m -= 12
                 place(rs, ins.reese(m, 2 * 4 * self.bl(bar), rng), self.pos(bar), rl)
-        self.add(tan, 0.45, rev=0.35, sc=0.35, hp=90, lp=5000)
+        self.add(tan, 0.45, rev=0.35, sc=0.35, hp=90, lp=5000, src="tanpura")
         self.add(rs, 0.35, rev=0.1)
 
     def r_toms(self):
@@ -546,7 +585,7 @@ class Journey:
                     st = int(round(x * 12))
                     place(buf, tom(first + b, st, 0.1), self.pos(first + b, k / div), 0.15 + 0.6 * x ** 1.6,
                           0.3 * np.sin(t * 3))
-        self.add(buf, 0.3, rev=0.2, dly=0.05, hp=55, lp=8000)
+        self.add(buf, 0.3, rev=0.2, dly=0.05, hp=55, lp=8000, src="toms")
 
     def r_didge(self):
         rng = self.rng
@@ -568,7 +607,7 @@ class Journey:
             if key not in cache:
                 cache[key] = ins.didgeridoo(self.tonic(bar) + 12, 4 * self.bl(bar), a, rng)
             place(buf, cache[key], self.pos(bar), lv[bar], 0.1 * np.sin(bar))
-        self.add(buf, 0.45, rev=0.15, dly=0.06, sc=0.4, hp=70)
+        self.add(buf, 0.45, rev=0.15, dly=0.06, sc=0.4, hp=70, src="didge")
 
     def r_acid(self):
         rng = self.rng
@@ -608,7 +647,7 @@ class Journey:
             fade[: int(0.004 * SR)] = np.linspace(0, 1, int(0.004 * SR))
             pn = 0.2 * np.sin(2 * np.pi * (s0 + np.arange(len(y))) / SR / 5.3)
             place(buf, np.stack([y * g * fade * (1 - pn), y * g * fade * (1 + pn)], axis=1), s0)
-        self.add(buf, 0.17, rev=0.12, dly=0.18, sc=0.3, hp=100, lp=6000)
+        self.add(buf, 0.17, rev=0.12, dly=0.18, sc=0.3, hp=100, lp=6000, src="acid")
 
     # ================================================================== melodic voices
     def r_melody(self):
@@ -652,7 +691,7 @@ class Journey:
             for bar, b, ln, m, g in run:
                 st = self.pos(bar, b) - s0
                 notes.append((st, int(ln * self.bl(bar) * SR * 0.97), m, g))
-            place(ney, ins.ney_phrase(notes, end - s0, rng), s0, 1.0, rng.uniform(-0.25, 0.25))
+            place(ney, ins.ney_phrase(notes, end - s0, rng, air_amt=self.AIR), s0, 1.0, rng.uniform(-0.25, 0.25))
 
         prev_end = None
         for ev in ney_events:
@@ -663,9 +702,9 @@ class Journey:
             run.append(ev)
             prev_end = st + int(ev[2] * self.bl(ev[0]) * SR)
         flush(run)
-        self.add(lead, 0.36, rev=0.28, dly=0.25, sc=0.5, hp=180, lp=6500, chorus=True)
-        self.add(ney, 0.42, rev=0.5, dly=0.3, sc=0.2, hp=200)
-        self.add(chant, 0.24, rev=0.55, dly=0.25, sc=0.25, hp=140, lp=6000)
+        self.add(lead, 0.36, rev=0.28, dly=0.25, sc=0.5, hp=180, lp=6500, chorus=True, src="lead")
+        self.add(ney, 0.42, rev=0.5, dly=0.3, sc=0.2, hp=200, src="ney")
+        self.add(chant, 0.24, rev=0.55, dly=0.25, sc=0.25, hp=140, lp=6000, src="chant")
 
     def r_pad(self):
         rng = self.rng
@@ -686,7 +725,7 @@ class Journey:
                 notes = [n - 12 if n > self.root + 43 else n for n in notes]
                 cache[key] = ins.pad_chord(notes, dur, dict(fc=1100, att=1.2, voices=5, lfo=9.0, rel=2.2), rng)
             place(buf, cache[key], self.pos(bar), lv[bar])
-        self.add(buf, 1.0, rev=0.45, sc=0.5, hp=110, lp=4500, chorus=True,
+        self.add(buf, 1.0, rev=0.45, sc=0.5, hp=110, lp=4500, chorus=True, src="pad",
                  cut=self.curve(np.clip(0.35 + 0.5 * self.E, 0, 1)))
 
     def r_fx(self):
@@ -709,21 +748,17 @@ class Journey:
         for name in self.FALLS:
             s = self.chap_start[name]
             place(buf, ins.downlifter(6 * 4 * self.bl(s), rng), self.pos(s), 0.9)
-        self.add(buf, 0.3, rev=0.35, dly=0.2, lp=8000)
+        self.add(buf, 0.3, rev=0.35, dly=0.2, lp=8000, src="fx")
 
     # ================================================================== render
     def render(self, log=print):
         self.mix, self.rev, self.dly = self.track(), self.track(), self.track()
         for fn in (getattr(self, name) for name in self.LAYERS):
+            self.active_layer = fn.__name__
             log(f"  · {fn.__name__[2:]}")
             fn()
         log("  · fx returns + master")
-        beat = 60.0 / float(np.median(self.bpm))
-        wet_d = dsp.pingpong(self.dly, 0.75 * beat, fb=0.42, damp=2800)
-        self.rev += wet_d * 0.3
-        wet_r = dsp.reverb(dsp.static(self.rev, "hp", 250),
-                           dsp.make_ir(3.4, np.random.default_rng(self.seed), bright=4500, dark=1500))
-        out = self.mix + wet_d * 0.5 + wet_r * 0.32
+        out = self.effect_returns()
         # macro dynamics: quiet, intimate low-energy passages; full level from E ~ 0.65 up
         g_db = self.DYN_DB * (1 - np.clip(self.E / self.DYN_FULL, 0, 1)) ** 1.3
         out *= (10 ** (self.curve(g_db)[: len(out)] / 20))[:, None]
@@ -731,7 +766,18 @@ class Journey:
         out = out[:end]
         fade = int(5 * SR)
         out[-fade:] *= np.linspace(1, 0, fade)[:, None] ** 2
-        return dsp.master(out, target_rms_db=self.MASTER_RMS)
+        if self.MASTER_LUFS is None:
+            return dsp.master(out, target_rms_db=self.MASTER_RMS)
+        return dsp.master_glue(out, target_lufs=self.MASTER_LUFS)
+
+    def effect_returns(self):
+        """Default effects; pieces can supply their own acoustic scene."""
+        beat = 60.0 / float(np.median(self.bpm))
+        wet_d = dsp.pingpong(self.dly, 0.75 * beat, fb=0.42, damp=2800)
+        self.rev += wet_d * 0.3
+        wet_r = dsp.fdn_reverb(dsp.static(self.rev, "hp", 250), seed=self.seed, **self.REVERB)
+        wet_r = dsp.eq(dsp.static(wet_r, "lp", 9000), "hs", 3500, 5.0 * self.AIR)
+        return self.mix + wet_d * 0.5 + wet_r * 0.32
 
     def describe(self):
         lines = [f"{type(self).__name__} — {self.bars} bars, {self.t0[-1] / 60:.1f} min, {self.bpm.min():.0f}-{self.bpm.max():.0f} BPM"]

@@ -48,3 +48,18 @@ Request: "make a new one to feel like something to hear on shrooms, very earthy 
 ## 5. Documentation
 
 - This `docs/` folder, `tools/check_score.py`, `twisted` added to `make_song.py`, and the `FALLS` attribute (Journey's downlifter chapters were hardcoded, which broke subclasses without those chapters).
+
+## 6. Space, richness, natural feel
+
+Request: "suggest better ways to make music, which should feel better, spatial, richer sounds, natural feel", then "do all steps".
+
+Measured first: Mycelium was almost mono (L/R correlation 0.93), had 0.06% of its energy above 3 kHz and 65% below 120 Hz.
+
+- Staging: `dsp.stage` and `dsp.early_ir` (interaural time and level differences, head shadow, distance, image-source reflections), with `STAGE` and `ROOM` per piece and slowly drifting ney and didgeridoo.
+- `dsp.fdn_reverb` replaced the noise-IR convolution reverbs.
+- Per-hit variation (`Journey.vary`, multiple cached takes) and oversampled `drive`.
+- Modal `hand_drum`, glottal-ensemble `voice`, `wander`-based drift in `supersaw`, `pad_chord` and `ney_phrase`.
+- `AIR`: soft breath and room air, with `--air 0` to compare against the old dark top end.
+- `dsp.master_glue`: LUFS-matched master with a low-end dip, slow glue compression and warm oversampled saturation.
+
+Result (Mycelium, same -10.6 LUFS): correlation above 300 Hz 0.73 to 0.45, side/mid in 300 Hz to 3 kHz -8.0 to -4.1 dB, energy below 120 Hz 65% to 54%, macro range 13.9 dB.

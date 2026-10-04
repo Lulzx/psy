@@ -57,20 +57,49 @@ The result is summed into `self.mix`, and scaled copies go to `self.rev` (reverb
 
 ## Effect returns
 
+### Staging (both pieces)
+
+`add(..., src="ney")` looks the source up in `STAGE`. A staged bus goes through
+`dsp.stage`, which applies interaural time and level differences and head shadow
+for its azimuth, and darkens, lowers and narrows the direct sound with distance.
+It also adds image-source early reflections from `ROOM`, computed per ear.
+Sources with `move` drift slowly around their azimuth (`dsp.wander`, period
+of about 18 s). Distance also raises the reverb send by `0.3 * dist`, so far
+sources are wetter. Untagged buses (kick, bass, reese, nature bed) go straight
+into the mix. Staging adds about 10 to 15 s to a render.
+
+### Mycelium's acoustic scene
+
+Mycelium overrides `effect_returns()` and `add()`. The space is a rock hollow open
+to the sky. Early reflections come from staging. The late ambience is
+`dsp.fdn_reverb` (3.0 s, highs decaying 0.45 times as fast) fed through a 300 Hz
+highpass, with a 3.5 kHz high shelf of `5 * AIR` dB on the return.
+
+Five dotted-eighth echoes follow the cumulative bar/beat map, including tempo
+changes. The first echo preserves the source image and later repeats alternate
+channels. Each successive repeat is lowpassed again. Longer flute notes send
+their last 40% into the delay, with a rising send envelope.
+
+Pads and drones yield by up to 26% to an interpolated foreground activity curve.
+
+### Default Journey returns
+
 - Delay: `dsp.pingpong` at 0.75 beats (a dotted eighth) of the median tempo, feedback 0.42, with a 2.8 kHz lowpass inside the feedback path so repeats darken. 30% of the delay output also goes into the reverb.
-- Reverb: the send is highpassed at 250 Hz, then convolved with a synthetic stereo impulse response from `dsp.make_ir` (3.4 s RT60 for Journey and Mycelium). The IR mixes a bright, fast-decaying noise layer with a dark, slow one, plus 14 early reflections.
+- Reverb: the send is highpassed at 250 Hz and fed to `dsp.fdn_reverb` (`REVERB`: 3.4 s, size 1.2 for Journey). The FDN tail is slowly modulated and decorrelated between channels, and is lowpassed at 9 kHz with an `AIR`-scaled high shelf.
 
 Returns are mixed back at 0.5 (delay) and 0.32 (reverb).
 
 ## Mastering
 
-1. Macro dynamics: a gain curve from the energy curve, `DYN_DB * (1 - clip(E / DYN_FULL))^1.3`. Journey uses -10 dB below energy 0.65 and Mycelium -12 dB below 0.85. This keeps quiet chapters quiet after loudness normalization.
+1. Macro dynamics: a gain curve from the energy curve, `DYN_DB * (1 - clip(E / DYN_FULL))^1.3`. Journey uses -13 dB below energy 0.65 and Mycelium -15 dB below 0.85. This keeps quiet chapters quiet after loudness normalization and glue compression (13 to 14 dB between the opening and the peak).
 2. A 5-second squared fade at the end.
-3. `dsp.master`: 28 Hz highpass, RMS normalization to `MASTER_RMS` (-11.5 dB) measured on the middle 60% of the track, a half-and-half blend of clean and tanh-saturated signal, then the lookahead limiter (ceiling 0.93, 4 ms lookahead, 80 ms release).
+3. With `MASTER_LUFS` set (Journey -10.3, Mycelium -10.6, the loudness of the previous renders, so A/B comparisons are fair), `dsp.master_glue`: low-end dip, slow glue compression, oversampled warm saturation and the limiter, normalized to integrated LUFS. With `MASTER_LUFS = None`, the older `dsp.master`: 28 Hz highpass, RMS normalization to `MASTER_RMS` (-11.5 dB) measured on the middle 60% of the track, a half-and-half blend of clean and tanh-saturated signal, then the lookahead limiter (ceiling 0.93, 4 ms lookahead, 80 ms release).
 
 ## Caching
 
-Most synth calls are deterministic for a given parameter set, so layers cache rendered notes in dicts keyed by pitch, duration and sound variant. The bass, for example, keys on `(midi, duration, sound, morph)` with the morph value rounded to quarters. This is why a 4-minute render with thousands of notes takes under 30 seconds.
+Most synth calls are deterministic for a given parameter set, so layers cache rendered notes in dicts keyed by pitch, duration and sound variant. The bass, for example, keys on `(midi, duration, sound, morph)` with the morph value rounded to quarters. This is why a 4-minute render with thousands of notes takes under a minute.
+
+Identical repeats sound mechanical, so caches hold several takes: 4 kicks, 3 bass variants per note (`Journey.vary` jitters filter peak, envelope decay, oscillator phase and detune), 2 lead takes, 3 log-drum takes and 8 hand-drum takes. Each hit picks one at random.
 
 ## Determinism
 

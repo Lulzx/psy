@@ -1,7 +1,7 @@
 """Synthesized instruments. Each returns a mono (n,) or stereo (n, 2) float array."""
 import numpy as np
 from .dsp import (SR, secs, saw, pulse, sine, noise, adsr, fade_edges, filt, lp4,
-                  static, drive, crush, midi_hz, pan)
+                  static, drive, crush, midi_hz, pan, phasor, wander)
 
 
 # ---------------------------------------------------------------- drums
@@ -160,10 +160,12 @@ def supersaw(midi, dur, p, rng):
     spread = p.get("detune", 0.18)
     L = np.zeros(n); R = np.zeros(n)
     t = secs(n)
-    vib = 1 + 0.003 * np.sin(2 * np.pi * 5.5 * t) * np.clip(t / 0.3, 0, 1)
+    rate = 5.5 * (1 + 0.05 * wander(n, 0.7, rng))
+    vib = 1 + 0.003 * np.sin(2 * np.pi * np.cumsum(rate) / SR + rng.uniform(0, 6.3)) * np.clip(t / 0.3, 0, 1)
     for v in range(voices):
         d = (v / (voices - 1) - 0.5) * 2 * spread if voices > 1 else 0
-        x = saw(hz * 2 ** (d / 12) * vib, n, rng.random())
+        drift = 2 ** (0.035 * wander(n, 0.25, rng, 2) / 12)  # each voice its own slow analog drift
+        x = saw(hz * 2 ** (d / 12) * vib * drift, n, rng.random())
         if v % 2:
             L += x * 0.8; R += x * 0.4
         else:
@@ -219,11 +221,13 @@ def pad_chord(midis, dur, p, rng):
     for m in midis:
         for v in range(p.get("voices", 3)):
             d = rng.uniform(-0.12, 0.12)
-            x = saw(midi_hz(m) * 2 ** (d / 12), n, rng.random())
+            drift = 2 ** (0.05 * wander(n, 0.15, rng, 2) / 12)
+            x = saw(midi_hz(m) * 2 ** (d / 12) * drift, n, rng.random())
             pp = rng.uniform(-0.8, 0.8)
             L += x * (1 - pp) / 2; R += x * (1 + pp) / 2
-    lfo = p.get("fc", 1400) * (1 + 0.45 * np.sin(2 * np.pi * t / p.get("lfo", 6.0) + rng.random() * 6))
-    out = np.stack([lp4(L, lfo, 1.2, 256), lp4(R, lfo, 1.2, 256)], axis=1)
+    lfo = p.get("fc", 1400) * 2 ** (0.6 * wander(n, 1 / p.get("lfo", 6.0), rng, 2))
+    lfo2 = lfo * 2 ** (0.15 * wander(n, 0.3, rng, 1))  # the sides breathe slightly apart
+    out = np.stack([lp4(L, lfo, 1.2, 256), lp4(R, lfo2, 1.2, 256)], axis=1)
     amp = adsr(n, p.get("att", 1.2), 2.0, 0.85, rel, dur)
     return out * amp[:, None] / (len(midis) * 2)
 
@@ -336,23 +340,45 @@ VOWELS = dict(a=[(800, 1.0), (1150, 0.5), (2900, 0.2)], o=[(450, 1.0), (800, 0.4
               u=[(325, 1.0), (700, 0.3), (2530, 0.08)])
 
 
-def voice(midi, dur, vowels, rng):
-    """Formant-synth chant: buzzy source through three moving vowel formants."""
+def glottal(hz, n, oq=0.6):
+    """Rosenberg glottal-flow derivative: the pulse real vocal folds radiate,
+    soft-cornered instead of a buzzy sawtooth edge."""
+    p, _ = phasor(hz, n)
+    tp, tn = oq * 0.66, oq * 0.34
+    g = np.where(p < tp, 0.5 * (1 - np.cos(np.pi * p / tp)),
+                 np.where(p < tp + tn, np.cos(np.pi / 2 * (p - tp) / tn), 0.0))
+    d = np.diff(g, prepend=g[0])
+    return d / (np.abs(d).max() + 1e-9)
+
+
+def voice(midi, dur, vowels, rng, singers=3):
+    """Formant chant from a small ensemble: glottal-pulse sources with jitter
+    (pitch micro-wobble), shimmer (level wobble), breath, slightly staggered
+    entries and their own vibrato, through moving vowel formants."""
     rel = 0.35
     n = int((dur + rel) * SR)
     t = secs(n)
-    vib = 1 + 0.011 * np.sin(2 * np.pi * 5.2 * t) * np.clip((t - 0.25) / 0.4, 0, 1)
-    scoop = 2 ** (-0.8 / 12 * np.exp(-t / 0.07))
-    hz = midi_hz(midi) * vib * scoop
-    src = saw(hz, n) * 0.7 + pulse(hz, n, 0.3) * 0.3 + noise(n, rng) * 0.04
+    src = np.zeros(n)
+    for k in range(singers):
+        det = 0.0 if k == 0 else rng.normal(0, 8)
+        rate = rng.uniform(4.9, 5.6) * (1 + 0.06 * wander(n, 0.5, rng, 1))
+        vib = 0.011 * np.sin(2 * np.pi * np.cumsum(rate) / SR + rng.uniform(0, 6.3)) * np.clip((t - 0.25) / 0.4, 0, 1)
+        jit = 0.003 * wander(n, 9.0, rng, 2) + 0.004 * wander(n, 0.4, rng, 1)
+        scoop = 2 ** (-0.8 / 12 * np.exp(-t / rng.uniform(0.05, 0.1)))
+        hz = midi_hz(midi) * 2 ** (det / 1200) * (1 + vib + jit) * scoop
+        x = glottal(hz, n, rng.uniform(0.55, 0.68)) * (1 + 0.1 * wander(n, 7.0, rng, 2))
+        x += static(noise(n, rng), "bp", (1000, 3000)) * 0.05  # aspiration
+        lag = int(rng.uniform(0, 0.04) * SR) if k else 0
+        src[lag:] += x[: n - lag] * (1.0 if k == 0 else 0.7)
     pts = np.linspace(0, dur, len(vowels))
     out = np.zeros(n)
     for k in range(3):
         f = np.interp(t, pts, [VOWELS[v][k][0] for v in vowels])
         g = np.interp(t, pts, [VOWELS[v][k][1] for v in vowels])
-        out += filt(src, "bp", f, 9.0 if k == 0 else 12.0, 64) * g
+        bw = 70 + 0.06 * f
+        out += filt(src, "bp", f, f / bw, 128) * g
     amp = adsr(n, 0.09, 0.4, 0.85, rel, dur)
-    return drive(out * amp * 2.5, 1.3)
+    return drive(out * amp * 4.0 / np.sqrt(singers), 1.3)
 
 
 def flute(midi, dur, rng):
@@ -414,7 +440,9 @@ def rich_bass(hz, dur, p):
     t = secs(n)
     amp = adsr(n, 0.0015, p.get("amp_decay", 0.12), p.get("sustain", 0.5), rel, dur)
     sub = sine(hz, n)
-    body = saw(hz * 2 ** (6 / 1200), n) + saw(hz * 2 ** (-6 / 1200), n, 0.37)
+    c = p.get("cents", 6)
+    ph = p.get("phase", 0.0)
+    body = saw(hz * 2 ** (c / 1200), n, ph) + saw(hz * 2 ** (-c / 1200), n, (0.37 + ph * 1.7) % 1)
     if p.get("wave") == "pulse":
         body = body * 0.6 + pulse(hz, n, 0.35) * 0.8
     fc = p["base"] + (p["peak"] - p["base"]) * np.exp(-t / p["env_decay"])
@@ -448,13 +476,19 @@ def warm_lead(midi, dur, rng):
     return out
 
 
-def ney_phrase(notes, n, rng):
+def ney_phrase(notes, n, rng, expression=1.0, air_amt=1.0):
     """Breathy ney/bansuri line rendered as one continuous breath-driven voice.
     notes: [(start_sample, len_samples, midi, grace)], sorted. Returns mono (n,)."""
     logf = np.full(n, np.nan)
     amp = np.zeros(n)
     trans = np.zeros(n)
     prev_end, prev_lf = -10 ** 9, None
+    phrase_t = secs(n)
+    # Continuous performer state; it does not reset at each note boundary.
+    drift = 0.0035 * expression * wander(n, 0.6, rng)
+    vib_rate = rng.uniform(4.4, 5.3) + 0.22 * np.sin(2 * np.pi * 0.31 * phrase_t)
+    vib = np.sin(2 * np.pi * np.cumsum(vib_rate) / SR + rng.uniform(0, 6.28))
+    pressure = np.zeros(n)
     for s, L, m, grace in notes:
         if s >= n:
             break
@@ -470,12 +504,16 @@ def ney_phrase(notes, n, rng):
             k = min(int(0.075 * SR), len(t))
             lf[:k] += 2.0 / 12
             lf[k:] += (2.0 / 12) * np.exp(-(t[k:] - t[k - 1]) / 0.015) if k < len(t) else 0
-        lf += 0.016 * np.clip((t - 0.35) / 0.7, 0, 1) * np.sin(2 * np.pi * 5.0 * t + rng.random() * 6)
+        strength = rng.uniform(0.78, 1.0)
+        breath_curve = strength * (0.84 + 0.16 * np.sin(np.pi * np.clip(t / max(L / SR, 0.01), 0, 1)))
+        pressure[s:e] = breath_curve
+        lf += drift[s:e] + 0.011 * expression * np.clip((t - 0.3) / 0.8, 0, 1) * vib[s:e]
+        lf += (breath_curve - 0.85) * 0.012 * expression
         logf[s:e] = lf
         att = 0.03 if legato else 0.1
         dur = L / SR
         env = np.minimum(t / att, 1.0) * np.clip((dur - t) / 0.14, 0, 1) * (0.85 + 0.15 * np.sin(np.pi * np.clip(t / dur, 0, 1)))
-        amp[s:e] = np.maximum(amp[s:e], env)
+        amp[s:e] = np.maximum(amp[s:e], env * breath_curve)
         trans[s:e] = np.maximum(trans[s:e], np.exp(-t / 0.06))
         prev_end, prev_lf = e, lf[-1]
     valid = ~np.isnan(logf)
@@ -487,10 +525,15 @@ def ney_phrase(notes, n, rng):
     idx[:first] = first
     hz = 2.0 ** logf[idx]
     ph = np.cumsum(hz) / SR
-    tone = sum(a * np.sin(2 * np.pi * k * ph) for k, a in ((1, 1.0), (2, 0.3), (3, 0.12), (4, 0.04)))
+    tone = np.sin(2 * np.pi * ph)
+    for k, a in ((2, 0.28), (3, 0.11), (4, 0.035)):
+        tone += a * (0.5 + 0.7 * pressure) * np.sin(2 * np.pi * k * ph)
     breath = filt(noise(n, rng), "bp", np.clip(hz * 2, 200, 4000), 2.2, 64)
-    y = (tone * 0.8 + breath * (0.18 + 0.5 * trans)) * filt(amp, "lp", 40, 0.7)
-    return static(y, "lp", 4500)
+    env = filt(amp, "lp", 40, 0.7)
+    y = (tone * 0.8 + breath * (0.12 + 0.22 * pressure + 0.3 * trans)) * env
+    # Soft, wide breath 'air' above the tone: no transients, follows the blowing.
+    air = static(static(noise(n, rng), "hp", 2500), "lp", 9000) * (0.3 * pressure + 0.5 * trans)
+    return static(y, "lp", 4500) + air * env * 0.07 * air_amt
 
 
 def tanpura(midi, dur, rng):
@@ -538,26 +581,44 @@ def didgeridoo(midi, dur, accents, rng):
 
 # ---------------------------------------------------------------- earth / ceremony kit
 
-def hand_drum(kind, hz, rng):
-    """Darbuka/djembe-style strokes. kind: doum (deep centre), tek (rim), slap, ghost."""
-    if kind == "doum":
-        n = int(0.6 * SR)
-        t = secs(n)
-        f = hz * (1 + 0.8 * np.exp(-t / 0.015))
-        y = sine(f, n) * np.exp(-t / 0.22) + 0.3 * sine(f * 1.52, n) * np.exp(-t / 0.07)
-        y += static(noise(n, rng), "lp", 300) * np.exp(-t / 0.02) * 0.5
-        return fade_edges(drive(y, 1.3))
-    n = int(0.18 * SR)
+MEMBRANE = (1.0, 1.594, 2.136, 2.296, 2.653, 2.918, 3.156, 3.501, 3.600, 4.060)
+# Mode weights by stroke: the centre (doum) excites the round (0,n) modes, the rim the diametric ones.
+STROKES = dict(doum=(1.0, 0.18, 0.08, 0.32, 0.05, 0.03, 0.02, 0.06, 0.1, 0.02),
+               tek=(0.25, 0.9, 0.75, 0.2, 0.6, 0.45, 0.35, 0.3, 0.12, 0.2),
+               slap=(0.3, 0.8, 0.9, 0.35, 0.8, 0.6, 0.55, 0.45, 0.25, 0.35))
+
+
+def hand_drum(kind, hz, rng, strength=0.8):
+    """Darbuka/djembe strokes as a modal membrane: ten circular-membrane modes,
+    each with its own decay, an amplitude-dependent pitch drop (tension
+    modulation), a contact-time excitation (soft hits are darker) and a goblet
+    body resonance. kind: doum (deep centre), tek (rim), slap, ghost."""
+    strength = float(np.clip(strength, 0.15, 1.0))
+    hz *= rng.uniform(0.985, 1.015)
+    deep = kind == "doum"
+    n = int((0.7 if deep else 0.25) * SR)
     t = secs(n)
-    if kind == "slap":
-        y = sine(hz * 3.1 * (1 + 0.2 * np.exp(-t / 0.004)), n) * np.exp(-t / 0.05)
-        y += filt(noise(n, rng), "bp", 750, 1.4) * np.exp(-t / 0.025) * 0.8
-    else:  # tek / ghost
-        y = sine(hz * 4.6 * (1 + 0.3 * np.exp(-t / 0.004)), n) * np.exp(-t / 0.035)
-        y += filt(noise(n, rng), "bp", 950, 1.6) * np.exp(-t / 0.015) * 0.45
-        if kind == "ghost":
-            y *= 0.45
-    return fade_edges(static(y, "lp", 3000))
+    w = STROKES["tek" if kind == "ghost" else kind]
+    base = hz if deep else hz * 1.9
+    t60 = (0.24 if deep else 0.06) * (0.8 + 0.25 * strength)
+    bend = 1 + (0.09 if deep else 0.04) * strength * np.exp(-t / 0.025)
+    y = np.zeros(n)
+    for r, a in zip(MEMBRANE, w):
+        r *= rng.uniform(0.99, 1.01)
+        a *= rng.uniform(0.8, 1.2)
+        y += a * sine(base * r * bend, n, rng.uniform(0, 0.1)) * np.exp(-t * r ** 0.9 / t60)
+    contact = int(SR * (0.0035 - 0.002 * strength) * (1.5 if deep else 0.8))
+    h = np.hanning(max(contact, 3))
+    y = np.convolve(y, h / h.sum())[:n]
+    if deep:  # goblet air resonance underneath the skin
+        y += 0.5 * sine(hz * 0.72, n) * np.exp(-t / 0.12) * (1 - np.exp(-t / 0.01))
+    skin = static(noise(n, rng), "bp", (2200, 4200)) * np.exp(-t / (0.004 if deep else 0.007))
+    y += skin * (0.08 if deep else 0.22) * strength
+    y = static(y, "lp", 2600 + 3200 * strength)
+    y /= np.abs(y).max() + 1e-9
+    if kind == "ghost":
+        y *= 0.45
+    return fade_edges(drive(y * (0.6 + 0.4 * strength), 1.0 + 0.3 * strength), 0.0003, 0.02)
 
 
 def udu(hz, rng):
@@ -574,30 +635,46 @@ def log_drum(hz, rng):
     """Wooden slit drum: damped inharmonic partials, no bell sustain."""
     n = int(0.4 * SR)
     t = secs(n)
-    y = sine(hz, n) * np.exp(-t / 0.11) + 0.3 * sine(hz * 2.76, n) * np.exp(-t / 0.04) \
-        + 0.12 * sine(hz * 5.4, n) * np.exp(-t / 0.015)
+    u = rng.uniform(0.85, 1.15, 3)
+    y = sine(hz, n) * np.exp(-t / (0.11 * u[0])) + 0.3 * u[1] * sine(hz * 2.76 * rng.uniform(0.99, 1.01), n) * np.exp(-t / 0.04) \
+        + 0.12 * u[2] * sine(hz * 5.4 * rng.uniform(0.98, 1.02), n) * np.exp(-t / 0.015)
     y += static(noise(n, rng), "lp", 1800) * np.exp(-t / 0.004) * 0.25
     return fade_edges(y, 0.0005, 0.03)
 
 
-def oud(midi, dur, rng, bright=1800.0):
-    """Plucked fretted string (Karplus-Strong) with a wooden body."""
+def oud(midi, dur, rng, bright=1800.0, strength=0.8, stroke=1):
+    """Paired plucked strings with fractional tuning and intensity-dependent pick/body."""
     from scipy.signal import lfilter
     n = int((dur + 0.6) * SR)
+    strength = float(np.clip(strength, 0.15, 1.0))
     hz = midi_hz(midi)
-    D = int(round(SR / hz)) - 1
-    m = 2 * (D + 1)
-    exc = np.zeros(n)
-    exc[:m] = filt(noise(m, rng), "lp", bright, 0.7) * np.hanning(m)
-    exc[:m] -= 0.5 * np.roll(exc[:m], int(m * 0.13))  # pick position comb
-    a = np.zeros(D + 2)
-    g = 0.4975 if dur > 0.3 else 0.495
-    a[0], a[D], a[D + 1] = 1.0, -g, -g
-    y = lfilter([1.0], a, exc)
-    y = y + filt(y, "bp", 260, 1.2) * 0.6 + filt(y, "bp", 620, 1.6) * 0.3
+    y = np.zeros(n)
+    for cents, level in ((-2.5, 0.72), (2.5, 0.45)):
+        # Two-tap loss filter contributes half a sample of phase delay.
+        period = SR / (hz * 2 ** (cents / 1200))
+        delay = period - 0.5
+        D = int(np.floor(delay))
+        fraction = delay - D
+        # First-order allpass has fractional phase delay at the fundamental.
+        w = 2 * np.pi / period
+        alpha = (1 - np.tan(w * fraction / 2) / np.tan(w / 2)) / (1 + np.tan(w * fraction / 2) / np.tan(w / 2))
+        m = min(2 * (D + 2), n)
+        exc = np.zeros(n)
+        exc[:m] = filt(noise(m, rng), "lp", bright * (0.65 + 0.55 * strength), 0.7) * np.hanning(m)
+        pick = rng.uniform(0.10, 0.19) if stroke > 0 else rng.uniform(0.18, 0.27)
+        exc[:m] -= 0.65 * np.roll(exc[:m], max(1, int(period * pick)))
+        # Loop = delay * averaging loss * fractional allpass.
+        g = 0.992 + 0.004 * strength
+        a = np.zeros(D + 4)
+        a[0], a[1] = 1.0, alpha
+        a[D:D + 3] -= g * 0.5 * np.array([alpha, 1 + alpha, 1])
+        y += level * lfilter([1.0, alpha], a, exc)
+    y += filt(y, "bp", 260, 1.2) * 0.4 + filt(y, "bp", 620, 1.6) * 0.25
+    y /= max(np.max(np.abs(y)), 1e-9)
+    y *= 0.65 + 0.35 * strength
     t = secs(n)
     y *= np.clip((dur + 0.6 - t) / 0.12, 0, 1)
-    return fade_edges(y / (np.abs(y).max() + 1e-9), 0.0005, 0.02)
+    return fade_edges(y, 0.0005, 0.02)
 
 
 def throat_phrase(notes, n, f0, rng):

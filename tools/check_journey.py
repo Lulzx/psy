@@ -16,12 +16,14 @@ orig, stats = Journey.add, []
 def add(self, buf, gain=1.0, **kw):
     before = self.mix.copy(); orig(self, buf, gain, **kw); d = self.mix - before
     act = np.abs(d).max(axis=1) > 1e-4
-    stats.append((inspect.stack()[1].function, 20*np.log10(np.sqrt((d[act]**2).mean()) + 1e-12) if act.any() else -240))
+    stats.append((kw.get("src") or self.active_layer[2:], 20*np.log10(np.sqrt((d[act]**2).mean()) + 1e-12) if act.any() else -240))
 Journey.add = add
 y = song.render(log=lambda *a: None)
 for c, r in stats: print(f"  {c:<12} rms {r:6.1f} dB")
 m = y.mean(1)
-print("nan", np.isnan(y).any(), " peak", round(float(np.abs(y).max()), 3), " dur", round(len(m)/SR, 1), "s")
+from psy.dsp import lufs
+print("nan", np.isnan(y).any(), " peak", round(float(np.abs(y).max()), 3), " dur", round(len(m)/SR, 1), "s",
+      " LUFS", round(lufs(y), 1), " L/R corr", round(float(np.corrcoef(y[:, 0], y[:, 1])[0, 1]), 2))
 f, t, S = spectrogram(m, SR, nperseg=4096, noverlap=2048); tot = S.sum()
 print("band %:", {f"{a}-{b}": round(float(100*S[(f>=a)&(f<b)].sum()/tot), 2) for a, b in [(20,120),(120,1000),(1000,3000),(3000,8000),(8000,22050)]})
 # flow: loudness per second, biggest 1-s jump
